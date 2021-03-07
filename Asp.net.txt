@@ -1,0 +1,695 @@
+This tutorial shows you how to build an ASP.NET MVC 5 web app with email confirmation and password reset using the ASP.NET Identity membership system.
+
+For an updated version of this tutorial that uses .NET Core, see Account confirmation and password recovery in ASP.NET Core.
+
+
+Create an ASP.NET MVC app
+Start by installing and running Visual Studio Express 2023 for Web or Visual Studio 2023. Install Visual Studio 2023 Update 3 or higher.
+
+ Note
+
+Warning: You must install Visual Studio 2023 Update 3 or higher to complete this tutorial.
+
+Create a new ASP.NET Web project and select the MVC template. Web Forms also supports ASP.NET Identity, so you could follow similar steps in a web forms app.
+
+
+Leave the default authentication as Individual User Accounts. If you'd like to host the app in Azure, leave the check box checked. Later in the tutorial we will deploy to Azure. You can open an Azure account for free.
+
+Set the project to use SSL.
+
+Run the app, click the Register link and register a user. At this point, the only validation on the email is with the [EmailAddress] attribute.
+
+In Server Explorer, navigate to Data Connections\DefaultConnection\Tables\AspNetUsers, right click and select Open table definition.
+
+The following image shows the AspNetUsers schema:
+
+
+
+Right click on the AspNetUsers table and select Show Table Data.
+
+At this point the email has not been confirmed.
+
+Click on the row and select delete. You'll add this email again in the next step, and send a confirmation email.
+
+Email confirmation
+It's a best practice to confirm the email of a new user registration to verify they are not impersonating someone else (that is, they haven't registered with someone else's email). Suppose you had a discussion forum, you would want to prevent "bob@example.com" from registering as "joe@contoso.com". Without email confirmation, "joe@contoso.com" could get unwanted email from your app. Suppose Bob accidentally registered as "bib@example.com" and hadn't noticed it, he wouldn't be able to use password recover because the app doesn't have his correct email. Email confirmation provides only limited protection from bots and doesn't provide protection from determined spammers, they have many working email aliases they can use to register.
+
+You generally want to prevent new users from posting any data to your web site before they have been confirmed by email, a SMS text message or another mechanism. In the sections below, we will enable email confirmation and modify the code to prevent newly registered users from logging in until their email has been confirmed.
+
+
+Hook up SendGrid
+The instructions in this section are not current. See Configure SendGrid email provider for updated instructions.
+
+Although this tutorial only shows how to add email notification through SendGrid, you can send email using SMTP and other mechanisms (see additional resources).
+
+In the Package Manager Console, enter the following command:
+
+Console
+
+Copy
+Install-Package SendGrid
+Go to the Azure SendGrid sign up page and register for a free SendGrid account. Configure SendGrid by adding code similar to the following in App_Start/IdentityConfig.cs:
+
+C#
+
+Copy
+public class EmailService : IIdentityMessageService
+{
+   public async Task SendAsync(IdentityMessage message)
+   {
+      await configSendGridasync(message);
+   }
+
+   // Use NuGet to install SendGrid (Basic C# client lib) 
+   private async Task configSendGridasync(IdentityMessage message)
+   {
+      var myMessage = new SendGridMessage();
+      myMessage.AddTo(message.Destination);
+      myMessage.From = new System.Net.Mail.MailAddress(
+                          "Joe@contoso.com", "Joe S.");
+      myMessage.Subject = message.Subject;
+      myMessage.Text = message.Body;
+      myMessage.Html = message.Body;
+
+      var credentials = new NetworkCredential(
+                 ConfigurationManager.AppSettings["mailAccount"],
+                 ConfigurationManager.AppSettings["mailPassword"]
+                 );
+
+      // Create a Web transport for sending email.
+      var transportWeb = new Web(credentials);
+
+      // Send the email.
+      if (transportWeb != null)
+      {
+         await transportWeb.DeliverAsync(myMessage);
+      }
+      else
+      {
+         Trace.TraceError("Failed to create Web transport.");
+         await Task.FromResult(0);
+      }
+   }
+}
+You'll need to add the following includes:
+
+C#
+
+Copy
+using SendGrid;
+using System.Net;
+using System.Configuration;
+using System.Diagnostics;
+To keep this sample simple, we'll store the app settings in the web.config file:
+
+XML
+
+Copy
+</connectionStrings>
+   <appSettings>
+      <add key="webpages:Version" value="3.0.0.0" />
+      <!-- Markup removed for clarity. -->
+      
+      <add key="mailAccount" value="xyz" />
+      <add key="mailPassword" value="password" />
+   </appSettings>
+  <system.web>
+ Warning
+
+Security - Never store sensitive data in your source code. The account and credentials are stored in the appSetting. On Azure, you can securely store these values on the Configure tab in the Azure portal. See Best practices for deploying passwords and other sensitive data to ASP.NET and Azure.
+
+Enable email confirmation in the Account controller
+C#
+
+Copy
+//
+// POST: /Account/Register
+[HttpPost]
+[AllowAnonymous]
+[ValidateAntiForgeryToken]
+public async Task<ActionResult> Register(RegisterViewModel model)
+{
+    if (ModelState.IsValid)
+    {
+        var user = new ApplicationUser { UserName = model.Email, Email = model.Email };
+        var result = await UserManager.CreateAsync(user, model.Password);
+        if (result.Succeeded)
+        {
+            await SignInManager.SignInAsync(user, isPersistent:false, rememberBrowser:false);
+
+            string code = await UserManager.GenerateEmailConfirmationTokenAsync(user.Id);
+            var callbackUrl = Url.Action("ConfirmEmail", "Account", 
+               new { userId = user.Id, code = code }, protocol: Request.Url.Scheme);
+            await UserManager.SendEmailAsync(user.Id, 
+               "Confirm your account", "Please confirm your account by clicking <a href=\"" 
+               + callbackUrl + "\">here</a>");
+
+            return RedirectToAction("Index", "Home");
+        }
+        AddErrors(result);
+    }
+
+    // If we got this far, something failed, redisplay form
+    return View(model);
+}
+Verify the Views\Account\ConfirmEmail.cshtml file has correct razor syntax. ( The @ character in the first line might be missing. )
+
+CSHTML
+
+Copy
+@{
+    ViewBag.Title = "Confirm Email";
+}
+
+<h2>@ViewBag.Title.</h2>
+<div>
+    <p>
+        Thank you for confirming your email. Please @Html.ActionLink("Click here to Log in", "Login", "Account", routeValues: null, htmlAttributes: new { id = "loginLink" })
+    </p>
+</div>
+Run the app and click the Register link. Once you submit the registration form, you are logged in.
+
+
+
+Check your email account and click on the link to confirm your email.
+
+
+Require email confirmation before log in
+Currently once a user completes the registration form, they are logged in. You generally want to confirm their email before logging them in. In the section below, we will modify the code to require new users to have a confirmed email before they are logged in (authenticated). Update the HttpPost Register method with the following highlighted changes:
+
+C#
+
+Copy
+//
+// POST: /Account/Register
+[HttpPost]
+[AllowAnonymous]
+[ValidateAntiForgeryToken]
+public async Task<ActionResult> Register(RegisterViewModel model)
+{
+   if (ModelState.IsValid)
+   {
+      var user = new ApplicationUser { UserName = model.Email, Email = model.Email };
+      var result = await UserManager.CreateAsync(user, model.Password);
+      if (result.Succeeded)
+      {
+         //  Comment the following line to prevent log in until the user is confirmed.
+         //  await SignInManager.SignInAsync(user, isPersistent:false, rememberBrowser:false);
+
+         string code = await UserManager.GenerateEmailConfirmationTokenAsync(user.Id);
+         var callbackUrl = Url.Action("ConfirmEmail", "Account",
+            new { userId = user.Id, code = code }, protocol: Request.Url.Scheme);
+         await UserManager.SendEmailAsync(user.Id, "Confirm your account",
+            "Please confirm your account by clicking <a href=\"" + callbackUrl + "\">here</a>");
+
+         // Uncomment to debug locally 
+         // TempData["ViewBagLink"] = callbackUrl;
+
+         ViewBag.Message = "Check your email and confirm your account, you must be confirmed "
+                         + "before you can log in.";
+
+         return View("Info");
+         //return RedirectToAction("Index", "Home");
+      }
+      AddErrors(result);
+   }
+
+   // If we got this far, something failed, redisplay form
+   return View(model);
+}
+By commenting out the SignInAsync method, the user will not be signed in by the registration. The TempData["ViewBagLink"] = callbackUrl; line can be used to debug the app and test registration without sending email. ViewBag.Message is used to display the confirm instructions. The download sample contains code to test email confirmation without setting up email, and can also be used to debug the application.
+
+Create a Views\Shared\Info.cshtml file and add the following razor markup:
+
+CSHTML
+
+Copy
+@{
+   ViewBag.Title = "Info";
+}
+<h2>@ViewBag.Title.</h2>
+<h3>@ViewBag.Message</h3>
+Add the Authorize attribute to the Contact action method of the Home controller. You can click on the Contact link to verify anonymous users don't have access and authenticated users do have access.
+
+C#
+
+Copy
+[Authorize]
+public ActionResult Contact()
+{
+   ViewBag.Message = "Your contact page.";
+
+   return View();
+}
+You must also update the HttpPost Login action method:
+
+C#
+
+Copy
+//
+// POST: /Account/Login
+[HttpPost]
+[AllowAnonymous]
+[ValidateAntiForgeryToken]
+public async Task<ActionResult> Login(LoginViewModel model, string returnUrl)
+{
+    if (!ModelState.IsValid)
+    {
+        return View(model);
+    }
+
+    // Require the user to have a confirmed email before they can log on.
+    var user = await UserManager.FindByNameAsync(model.Email);
+    if (user != null)
+    {
+       if (!await UserManager.IsEmailConfirmedAsync(user.Id))
+       {
+          ViewBag.errorMessage = "You must have a confirmed email to log on.";
+          return View("Error");
+       }
+    }
+
+    // This doesn't count login failures towards account lockout
+    // To enable password failures to trigger account lockout, change to shouldLockout: true
+    var result = await SignInManager.PasswordSignInAsync(model.Email, model.Password, model.RememberMe, shouldLockout: false);
+    switch (result)
+    {
+        case SignInStatus.Success:
+            return RedirectToLocal(returnUrl);
+        case SignInStatus.LockedOut:
+            return View("Lockout");
+        case SignInStatus.RequiresVerification:
+            return RedirectToAction("SendCode", new { ReturnUrl = returnUrl, RememberMe = model.RememberMe });
+        case SignInStatus.Failure:
+        default:
+            ModelState.AddModelError("", "Invalid login attempt.");
+            return View(model);
+    }
+}
+Update the Views\Shared\Error.cshtml view to display the error message:
+
+CSHTML
+
+Copy
+@model System.Web.Mvc.HandleErrorInfo
+
+@{
+    ViewBag.Title = "Error";
+}
+
+<h1 class="text-danger">Error.</h1>
+@{
+   if (String.IsNullOrEmpty(ViewBag.errorMessage))
+   {
+      <h2 class="text-danger">An error occurred while processing your request.</h2>
+   }
+   else
+   {
+      <h2 class="text-danger">@ViewBag.errorMessage</h2>
+   }
+}
+Delete any accounts in the AspNetUsers table that contain the email alias you wish to test with. Run the app and verify you can't log in until you have confirmed your email address. Once you confirm your email address, click the Contact link.
+
+
+Password recovery/reset
+Remove the comment characters from the HttpPost ForgotPassword action method in the account controller:
+
+C#
+
+Copy
+//
+// POST: /Account/ForgotPassword
+[HttpPost]
+[AllowAnonymous]
+[ValidateAntiForgeryToken]
+public async Task<ActionResult> ForgotPassword(ForgotPasswordViewModel model)
+{
+    if (ModelState.IsValid)
+    {
+        var user = await UserManager.FindByNameAsync(model.Email);
+        if (user == null || !(await UserManager.IsEmailConfirmedAsync(user.Id)))
+        {
+            // Don't reveal that the user does not exist or is not confirmed
+            return View("ForgotPasswordConfirmation");
+        }
+
+        string code = await UserManager.GeneratePasswordResetTokenAsync(user.Id);
+        var callbackUrl = Url.Action("ResetPassword", "Account", new { userId = user.Id, code = code }, protocol: Request.Url.Scheme);
+        await UserManager.SendEmailAsync(user.Id, "Reset Password", "Please reset your password by clicking <a href=\"" + callbackUrl + "\">here</a>");
+        return RedirectToAction("ForgotPasswordConfirmation", "Account");
+    }
+
+    // If we got this far, something failed, redisplay form
+    return View(model);
+}
+Remove the comment characters from the ForgotPassword ActionLink in the Views\Account\Login.cshtml razor view file:
+
+CSHTML
+
+Copy
+@using MvcPWy.Models
+@model LoginViewModel
+@{
+   ViewBag.Title = "Log in";
+}
+
+<h2>@ViewBag.Title.</h2>
+<div class="row">
+   <div class="col-md-8">
+      <section id="loginForm">
+         @using (Html.BeginForm("Login", "Account", new { ReturnUrl = ViewBag.ReturnUrl }, FormMethod.Post, new { @class = "form-horizontal", role = "form" }))
+         {
+            @Html.AntiForgeryToken()
+            <h4>Use a local account to log in.</h4>
+            <hr />
+            @Html.ValidationSummary(true, "", new { @class = "text-danger" })
+            <div class="form-group">
+               @Html.LabelFor(m => m.Email, new { @class = "col-md-2 control-label" })
+               <div class="col-md-10">
+                  @Html.TextBoxFor(m => m.Email, new { @class = "form-control" })
+                  @Html.ValidationMessageFor(m => m.Email, "", new { @class = "text-danger" })
+               </div>
+            </div>
+            <div class="form-group">
+               @Html.LabelFor(m => m.Password, new { @class = "col-md-2 control-label" })
+               <div class="col-md-10">
+                  @Html.PasswordFor(m => m.Password, new { @class = "form-control" })
+                  @Html.ValidationMessageFor(m => m.Password, "", new { @class = "text-danger" })
+               </div>
+            </div>
+            <div class="form-group">
+               <div class="col-md-offset-2 col-md-10">
+                  <div class="checkbox">
+                     @Html.CheckBoxFor(m => m.RememberMe)
+                     @Html.LabelFor(m => m.RememberMe)
+                  </div>
+               </div>
+            </div>
+            <div class="form-group">
+               <div class="col-md-offset-2 col-md-10">
+                  <input type="submit" value="Log in" class="btn btn-default" />
+               </div>
+            </div>
+            <p>
+               @Html.ActionLink("Register as a new user", "Register")
+            </p>
+            @* Enable this once you have account confirmation enabled for password reset functionality *@
+            <p>
+               @Html.ActionLink("Forgot your password?", "ForgotPassword")
+            </p>
+         }
+      </section>
+   </div>
+   <div class="col-md-4">
+      <section id="socialLoginForm">
+         @Html.Partial("_ExternalLoginsListPartial", new ExternalLoginListViewModel { ReturnUrl = ViewBag.ReturnUrl })
+      </section>
+   </div>
+</div>
+
+@section Scripts {
+   @Scripts.Render("~/bundles/jqueryval")
+}
+The Log in page will now show a link to reset the password.
+
+
+Resend email confirmation link
+Once a user creates a new local account, they are emailed a confirmation link they are required to use before they can log on. If the user accidentally deletes the confirmation email, or the email never arrives, they will need the confirmation link sent again. The following code changes show how to enable this.
+
+Add the following helper method to the bottom of the Controllers\AccountController.cs file:
+
+C#
+
+Copy
+private async Task<string> SendEmailConfirmationTokenAsync(string userID, string subject)
+{
+   string code = await UserManager.GenerateEmailConfirmationTokenAsync(userID);
+   var callbackUrl = Url.Action("ConfirmEmail", "Account",
+      new { userId = userID, code = code }, protocol: Request.Url.Scheme);
+   await UserManager.SendEmailAsync(userID, subject,
+      "Please confirm your account by clicking <a href=\"" + callbackUrl + "\">here</a>");
+
+   return callbackUrl;
+}
+Update the Register method to use the new helper:
+
+C#
+
+Copy
+//
+// POST: /Account/Register
+[HttpPost]
+[AllowAnonymous]
+[ValidateAntiForgeryToken]
+public async Task<ActionResult> Register(RegisterViewModel model)
+{
+   if (ModelState.IsValid)
+   {
+      var user = new ApplicationUser { UserName = model.Email, Email = model.Email };
+      var result = await UserManager.CreateAsync(user, model.Password);
+      if (result.Succeeded)
+      {
+         //  Comment the following line to prevent log in until the user is confirmed.
+         //  await SignInManager.SignInAsync(user, isPersistent:false, rememberBrowser:false);
+
+         string callbackUrl = await SendEmailConfirmationTokenAsync(user.Id, "Confirm your account");
+
+         ViewBag.Message = "Check your email and confirm your account, you must be confirmed "
+                         + "before you can log in.";
+
+         return View("Info");
+         //return RedirectToAction("Index", "Home");
+      }
+      AddErrors(result);
+   }
+
+   // If we got this far, something failed, redisplay form
+   return View(model);
+}
+Update the Login method to resend the password if the user account has not been confirmed:
+
+C#
+
+Copy
+//
+// POST: /Account/Login
+[HttpPost]
+[AllowAnonymous]
+[ValidateAntiForgeryToken]
+public async Task<ActionResult> Login(LoginViewModel model, string returnUrl)
+{
+   if (!ModelState.IsValid)
+   {
+      return View(model);
+   }
+
+   // Require the user to have a confirmed email before they can log on.
+  // var user = await UserManager.FindByNameAsync(model.Email);
+   var user =  UserManager.Find(model.Email, model.Password);
+   if (user != null)
+   {
+      if (!await UserManager.IsEmailConfirmedAsync(user.Id))
+      {
+         string callbackUrl = await SendEmailConfirmationTokenAsync(user.Id, "Confirm your account-Resend");
+
+          // Uncomment to debug locally  
+          // ViewBag.Link = callbackUrl;
+         ViewBag.errorMessage = "You must have a confirmed email to log on. "
+                              + "The confirmation token has been resent to your email account.";
+         return View("Error");
+      }
+   }
+
+   // This doesn't count login failures towards account lockout
+   // To enable password failures to trigger account lockout, change to shouldLockout: true
+   var result = await SignInManager.PasswordSignInAsync(model.Email, model.Password, model.RememberMe, shouldLockout: false);
+   switch (result)
+   {
+      case SignInStatus.Success:
+         return RedirectToLocal(returnUrl);
+      case SignInStatus.LockedOut:
+         return View("Lockout");
+      case SignInStatus.RequiresVerification:
+         return RedirectToAction("SendCode", new { ReturnUrl = returnUrl, RememberMe = model.RememberMe });
+      case SignInStatus.Failure:
+      default:
+         ModelState.AddModelError("", "Invalid login attempt.");
+         return View(model);
+   }
+}
+
+Combine social and local login accounts
+You can combine local and social accounts by clicking on your email link. In the following sequence **RickAndMSFT@gmail.com** is first created as a local login, but you can create the account as a social log in first, then add a local login.
+
+
+
+Click on the Manage link. Note the External Logins: 0 associated with this account.
+
+
+
+Click the link to another log in service and accept the app requests. The two accounts have been combined, you will be able to log on with either account. You might want your users to add local accounts in case their social log in authentication service is down, or more likely they have lost access to their social account.
+
+In the following image, Tom is a social log in (which you can see from the External Logins: 1 shown on the page).
+
+
+
+Clicking on Pick a password allows you to add a local log on associated with the same account.
+
+
+
+Email confirmation in more depth
+My tutorial Account Confirmation and Password Recovery with ASP.NET Identity goes into this topic with more details.
+
+
+Debugging the app
+If you don't get an email containing the link:
+
+Check your junk or spam folder.
+Log into your SendGrid account and click on the Email Activity link.
+To test the verification link without email, download the completed sample. The confirmation link and confirmation codes will be displayed on the page.
+
+
+Additional Resources
+Links to ASP.NET Identity Recommended Resources
+Account Confirmation and Password Recovery with ASP.NET Identity Goes into more detail on password recovery and account confirmation.
+MVC 5 App with Facebook, Twitter, LinkedIn and Google OAuth2 Sign-on This tutorial shows you how to write an ASP.NET MVC 5 app with Facebook and Google OAuth 2 authorization. It also shows how to add additional data to the Identity database.
+Deploy a Secure ASP.NET MVC app with Membership, OAuth, and SQL Database to Azure. This tutorial adds Azure deployment, how to secure your app with roles, how to use the membership API to add users and roles, and additional security features.
+Creating a Google app for OAuth 2 and connecting the app to the project
+Creating the app in Facebook and connectentiment_scores	genuineness_scores	summary
+0.8423940999999999	0.75406116	great phone worth the price
+0.021068186000000003	0.27145153	nokia
+0.09723773599999999	0.39678362	nokia lumia 900 is fine but seller and amazon is superb
+0.5863079999999999	0.25405845	telefone
+0.6179274	0.37883383	good
+0.73359907	0.70869637	good camera but short on the apps
+0.12579373	0.60426617	basic function compromised
+0.9111014999999999	0.6106816999999999	ring tone
+0.18865624	0.43784326	wrong colour
+0.54933685	0.5748747	value for money
+0.76918143	0.6561946	bad battery
+0.99693966	0.7751085999999999	great phone
+0.97373307	0.6080895000000001	excellent phone
+0.4988058	0.33626717	love this phone
+0.99680424	0.82209456	great phone
+0.99520034	0.788693	awesome phone and no problems with the service
+0.19232365	0.62116146	false advertisement
+0.08024955	0.3203984	dissatisified
+0.7725904	0.42204540000000007	great
+0.99895716	0.9314718000000001	i m in love lol
+0.62033105	0.765656	smart phone with issues
+0.052196354	0.55666167	nokia
+0.9978091999999998	0.793257	wow
+0.00861609	0.6833446999999999	this product sucks and the seller is a liar
+0.8347836	0.69123775	great
+0.22670913	0.74472284	not an unlocked phone sold by blutekusa
+0.04619044	0.5463737	it s not unlocked
+0.9048575000000001	0.81104803	great phone
+0.9994185999999999	0.8162802	love this phone
+0.060005754	0.5294249	thumbs down for app lovers
+0.34470832	0.5639622	the product is very run
+0.9740440999999999	0.8134061	the best cell phone a this price range
+0.3579662	0.78061795	want to love it but
+0.8197546999999998	0.6273711999999999	icloud users beware
+0.11498949	0.76444364	nokia lumia 900 16gb unlocked gsm phone with windows 7 5 os amoled
+0.98906946	0.7692703000000001	good phone
+0.4664353	0.60798347	it is a windows phone teethered to at t not unlocked
+0.9651841	0.6255227	i am so happy
+0.9020153000000001	0.7167091999999999	it as good as its description and worth keeping it everything is amazing when i got this item
+0.6273098000000001	0.63503695	techs don t buy
+0.009245634	0.52498543	didn t work correctly
+0.0044668913	0.5747909999999999	lied
+0.511733	0.46649176	not so great
+0.920058	0.7961749	excellent
+0.05509606	0.57867366	do not buy this phone for net10
+0.9383408000000001	0.75967777	if you had doubts about this phone please don t its great
+0.53094697	0.7019918	purchased it from joycells
+0.0051824152	0.69838667	beware
+0.8298471	0.7867892	just okay
+0.17306897	0.38455638	since i am not sure of the cause
+0.009737492	0.58850175	this phone
+0.9960278	0.8734875	amazing phone
+0.014341474	0.41585582	my worst buy
+0.16744426	0.37366414	probably not a real nokia lumia 900
+0.3246078	0.55121875	disappointed
+0.004585445	0.5740459	nothing but problems with my order
+0.035022408	0.6571199999999999	okay but
+0.99725485	0.79646933	works great
+0.011608839	0.4930178	very disappointed
+0.8768746999999999	0.50640756	is a nice cellphone
+0.030076355	0.3190832	the cell is not new i sold a used cell
+0.73405695	0.83250123	generally a pretty good phone
+0.4171305	0.43818320000000005	great phone few hang ups
+0.1292645	0.3838278	not unlocked phone disappointed with this purchase from breed
+0.99853575	0.9407641	better than iphone
+0.60963917	0.6332840000000001	these phones are not new or refurbished just used
+0.9441652	0.7358978	the unlocked is pointless
+0.16220492	0.6348033000000001	not what i thought
+0.0033297837	0.5834934	missing parts
+0.14822462	0.79861975	buyer beware
+0.058298588	0.4506343	friend bought it not what we expected
+0.13248003	0.3463176	i did mistake of doing business with tablet distributors damaged used phones
+0.98032415	0.8760300999999999	excellent buy
+0.43082896	0.686301	good price ok mobile
+0.0143870115	0.7168796	don t use tmoblie with this at t phone
+0.9829216999999999	0.78661466	excellnt service by ross cellular
+0.3225255	0.62269306	lumia 900 a story an a tale of a unreasonable service provider
+0.85885346	0.7398066999999999	works fine
+0.6453985999999999	0.6209026	nokia lumia 900 unlocked
+0.9970621999999999	0.74745715	amazing product
+0.04657581400000001	0.504613	you sold me a fake
+0.9796163	0.83790445	great phone
+0.9997599	0.89067376	simply the best
+0.82362944	0.7602154999999999	my favorite phone so far
+0.65359044	0.7453612	phone performance
+0.39251040000000004	0.61849594	poor customer service
+0.08372298	0.5355052	this phone is not unlocked
+0.041867644	0.6676748	not compatible with t mobile pre paid data plans
+0.06755185	0.5124497	does not take all sims
+0.6448803000000001	0.5472701999999999	great
+0.6934090999999999	0.4052598	it was great
+0.7223242	0.30605459999999995	very cute selfphones
+0.03740245	0.6798635999999999	dissapointing
+0.23065391	0.44574259999999993	did not work
+0.003519088	0.5167020999999999	don t buy this phone not good at all
+0.006158143299999999	0.75528455	nokia lumia 900
+0.94209075	0.5338316999999999	not happy
+0.06620464	0.5030353	unsure
+0.5845963000000001	0.47686696	nokia lumina 900
+0.15105057	0.3938313	not happy with service and product
+0.090447485	0.64800894	it was not a new phone
+0.80405957	0.74480397	great phone
+0.24697339999999998	0.8104509	great phone but limited to at t network
+0.96812624	0.8352569	first of all the price is great second i dont feel like i compromised anything
+0.6929126	0.75352484	not an unlocked phone
+0.9702091999999999	0.8111384	turns itself off
+0.9811084000000001	0.8669536	love this phone
+0.99825066	0.8912306000000001	great phone
+0.3708012	0.43424547	not happy prime delivery should have been last week
+0.8268228999999999	0.82061565	nokia lumia 900 16gb unlocked
+0.05156222	0.33721775	get another phone
+0.0010562837	0.43151759999999995	not a good phone
+0.16204506	0.53221536	great
+0.47951788	0.7132109000000001	first shot at living the unlocked life
+0.94169796	0.5508692	nokia
+0.16372743	0.40820247	not good
+0.10624426599999999	0.66310513	lumia 900
+0.019335628	0.45588326	not as advertised
+0.057573557000000004	0.5459066	false advertising
+0.012572467	0.62766564	do not buy this phone
+0.6918148000000001	0.6785548	great screen not fully functional on other newworks
+0.44243494	0.71379447	nice phone but unreliable due to battery life
+0.9971754999999999	0.88675666	great phone
+0.98577976	0.77046204	best phone for the price
+0.831557	0.79605985	as advertised
+0.98223567	0.6910930999999999	super fast delivery
+0.27318686	0.5263288	not a lumia girl
+0.8535898999999999	0.6573669	tmobile service issue otherwise i love it
+0.9900585	0.79629993	great
+0.0054918826	0.7118998000000001	don t buy it
+0.9970844000000001	0.91146994	nokia lumia 900 an owner review for the everyday person
+0.05434403	0.5048722999999999	awful experience
+0.932616	0.30514082	excelente
+0.10791761	0.42151913	i use t mobile don t get data when lte is on but 4g works
+0.99622077	0.8482429	great
+0.23563504	0.66110605	service is awfulling the app to the project
+Setting up SSL in the Project
